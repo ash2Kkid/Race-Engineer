@@ -99,28 +99,15 @@ export interface WeatherInfo {
 }
 
 const getUrls = () => {
-  let backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '';
   let isLocal = false;
-
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
     isLocal = hostname === 'localhost' || hostname === '127.0.0.1';
-    if (!backendUrl || backendUrl.includes('127.0.0.1') || backendUrl.includes('localhost')) {
-      if (!isLocal) {
-        backendUrl = 'https://ash2kkid-f1-race-engineer.hf.space';
-      }
-    }
   }
 
-  if (!backendUrl) {
-    backendUrl = 'http://127.0.0.1:8000';
-    isLocal = true;
-  }
-
-  const directBaseUrl = backendUrl.replace(/\/+$/, '');
-  // Use relative next.js API rewrite proxy to bypass CORS for HTTP requests on deployed env
+  // Local development points directly to localhost, production Vercel points to Hugging Face via server-side rewrite proxy
   const baseUrl = isLocal ? 'http://127.0.0.1:8000' : '/api/backend';
-  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || (directBaseUrl.replace(/^http/, 'ws') + '/ws');
+  const wsUrl = isLocal ? 'ws://127.0.0.1:8000/ws' : 'wss://ash2kkid-f1-race-engineer.hf.space/ws';
   return { baseUrl, wsUrl };
 };
 
