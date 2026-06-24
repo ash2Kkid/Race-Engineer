@@ -1,3 +1,12 @@
+---
+title: F1 Race Engineer
+emoji: 🏎️
+colorFrom: red
+colorTo: black
+sdk: docker
+app_port: 7860
+---
+
 # F1 Race Telemetry & Strategy Dashboard
 
 A real-time, high-performance Formula 1 race replay and telemetry visualization dashboard. This project replaces the legacy Flutter implementation with a high-performance Next.js client and a FastAPI backend to deliver smooth, 60 FPS rendering.
