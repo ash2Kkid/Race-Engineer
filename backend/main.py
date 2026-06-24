@@ -37,6 +37,42 @@ active_connections = []     # List of active WebSocket client connections
 driver_battery = {}         # Track ERS battery levels for active drivers
 driver_telemetry_state = {} # Persistent speed/gear/battery state for drivers
 
+import time
+
+class ClientSession:
+    def __init__(self, client_id: str):
+        self.client_id = client_id
+        self.current_lap = 1
+        self.replay_status = "playing"
+        self.replay_speed = 1.0
+        self.current_session_time = None
+        self.track_status = "GREEN"
+        self.active_connections = []
+        self.driver_battery = {}
+        self.driver_telemetry_state = {}
+
+client_sessions = {}
+
+def get_client_session(client_id: str = None) -> ClientSession:
+    global current_session_time, current_lap, replay_status, replay_speed, track_status, active_connections, driver_battery, driver_telemetry_state
+    if not client_id:
+        client_id = "default"
+    if client_id not in client_sessions:
+        session = ClientSession(client_id)
+        if client_id == "default":
+            session.current_lap = current_lap
+            session.replay_status = replay_status
+            session.replay_speed = replay_speed
+            session.current_session_time = current_session_time
+            session.track_status = track_status
+            session.active_connections = active_connections
+            session.driver_battery = driver_battery
+            session.driver_telemetry_state = driver_telemetry_state
+        else:
+            session.current_session_time = current_session_time
+        client_sessions[client_id] = session
+    return client_sessions[client_id]
+
 # Live Streaming variables for upcoming Austrian GP
 is_using_mock_data = False
 last_lap_timestamp = None
@@ -497,6 +533,12 @@ async def load_session_data(session_key: int):
                     min_date = lap_date
                     
     current_session_time = min_date or datetime.now()
+    for session in client_sessions.values():
+        session.current_session_time = current_session_time
+        session.current_lap = 1
+        session.replay_status = "playing"
+        session.driver_telemetry_state = {}
+        session.driver_battery = {}
     logger.info(f"Session loading complete. Virtual start time: {current_session_time}")
 
 def get_track_status_at_time(cur_time: datetime):
@@ -1274,8 +1316,362 @@ def recalculate_gaps_and_intervals(standings, is_time_trial=False):
                             item["interval"] = "0.000s"
                             item["delta"] = 0.0
 
+def prune_inactive_sessions():
+    for cid in list(client_sessions.keys()):
+        if cid != "default" and not client_sessions[cid].active_connections:
+            del client_sessions[cid]
+
+async def tick_session(session: ClientSession, dt: float, tick: int):
+    # Skip if session data is not loaded yet
+    if not session_cache.get("drivers"):
+        return
+        
+    # Advance virtual session time if playing
+    if session.replay_status == "playing" and session.current_session_time:
+        end_time = get_session_end_time()
+        if end_time and session.current_session_time >= end_time:
+            session.current_session_time = end_time
+            session.replay_status = "paused"
+            await broadcast_replay_status_to_session(session)
+        else:
+            next_time = session.current_session_time + timedelta(seconds=dt * session.replay_speed)
+            if end_time and next_time >= end_time:
+                session.current_session_time = end_time
+                session.replay_status = "paused"
+                await broadcast_replay_status_to_session(session)
+            else:
+                session.current_session_time = next_time
+        
+        # Resolve current_lap based on current_session_time
+        standings = get_standings_for_lap(session.current_lap, session.current_session_time)
+        if standings:
+            leader_id = standings[0]["driver_id"]
+            leader_num = None
+            for d in session_cache["drivers"]:
+                if d["code"] == leader_id:
+                    leader_num = d["number"]
+                    break
+            if leader_num:
+                leader_laps = session_cache["laps_by_driver"].get(leader_num, [])
+                resolved_lap = 1
+                for lp in sorted(leader_laps, key=lambda x: x["lap_number"]):
+                    lp_date = lp.get("parsed_date_start")
+                    if lp_date and lp_date <= session.current_session_time:
+                        resolved_lap = lp["lap_number"]
+                    else:
+                        break
+                session.current_lap = resolved_lap
+    else:
+        standings = get_standings_for_lap(session.current_lap, session.current_session_time)
+        
+    if not standings:
+        return
+        
+    # Map progress and active aerodynamics (DRS) for all drivers
+    for item in standings:
+        d_num = None
+        for d in session_cache["drivers"]:
+            if d["code"] == item["driver_id"]:
+                d_num = d["number"]
+                break
+        
+        is_retired = item.get("gap") in ["DNF", "DNS", "DNQ"] or item.get("status") in ["DNF", "DNS"]
+        if is_retired:
+            state = session.driver_telemetry_state.get(item["driver_id"])
+            if state and "last_progress" in state:
+                prog = state["last_progress"]
+            else:
+                try:
+                    num_val = int(d_num) if d_num else 0
+                except ValueError:
+                    num_val = 0
+                prog = 0.90 + (num_val % 17) * 0.005 if (item.get("gap") == "DNF" or item.get("status") == "DNF") else 0.0
+            is_pitting = False
+            lap_dur = 80.0
+            pit_start = None
+            pit_dur = 22.0
+            drs_active = False
+        else:
+            if d_num:
+                prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, session.current_session_time, session_cache["track_name"])
+            else:
+                prog, is_pitting, lap_dur, pit_start, pit_dur = 0.0, False, 80.0, None, 22.0
+            
+            # Store last progress
+            state = session.driver_telemetry_state.get(item["driver_id"])
+            if not state:
+                state = {
+                    "prev_speed": 0.0,
+                    "current_gear": 1,
+                    "battery": 80.0
+                }
+                session.driver_telemetry_state[item["driver_id"]] = state
+            state["last_progress"] = prog
+            
+            # Check DRS zone
+            track_location = session_cache["track_name"].lower()
+            drs_active = False
+            if not is_pitting:
+                if "monza" in track_location:
+                    drs_active = (prog >= 0.82 or prog <= 0.18) or (prog >= 0.50 and prog <= 0.65)
+                elif "silverstone" in track_location:
+                    drs_active = (prog >= 0.22 and prog <= 0.38) or (prog >= 0.70 and prog <= 0.88)
+                elif "spa" in track_location:
+                    drs_active = (prog >= 0.42 and prog <= 0.60) or (prog >= 0.90 or prog <= 0.12)
+                elif "barcelona" in track_location:
+                    drs_active = (prog >= 0.88 or prog <= 0.12) or (prog >= 0.40 and prog <= 0.55)
+                else:
+                    drs_active = (prog >= 0.85 or prog <= 0.15)
+        
+        item["track_progress"] = prog
+        item["drs_active"] = drs_active
+        item["is_pitting"] = is_pitting
+        item["lap_duration"] = lap_dur
+        item["pit_start_time"] = pit_start
+        item["pit_duration"] = pit_dur
+
+    # Sort standings by actual distance covered (lap number + track progress) descending
+    standings.sort(key=lambda x: (x.get("lap_num") or 1) + (x.get("track_progress") or 0.0), reverse=True)
+    
+    # Re-assign positions
+    for idx, item in enumerate(standings):
+        item["position"] = idx + 1
+
+    session_type_upper = session_cache.get("session_type", "Race").upper()
+    is_time_trial = "QUALIFYING" in session_type_upper or "PRACTICE" in session_type_upper
+    recalculate_gaps_and_intervals(standings, is_time_trial)
+
+    if session.replay_status == "playing":
+        session.track_status = get_track_status_at_time(session.current_session_time)
+
+    if session.active_connections:
+        # 1. Telemetry curves for all drivers on every tick (0.1s)
+        telemetry_all_packet = {
+            "type": "telemetry_all",
+            "data": {}
+        }
+        for idx, item in enumerate(standings):
+            d_id = item["driver_id"]
+            prog = item["track_progress"]
+            is_pitting = item["is_pitting"]
+            drs_active = item["drs_active"]
+            
+            is_retired = item.get("gap") in ["DNF", "DNS", "DNQ"] or item.get("status") in ["DNF", "DNS"]
+            
+            if is_retired:
+                speed = 0.0
+            elif is_pitting:
+                speed = 0.0
+            else:
+                speed = get_interpolated_speed(session_cache["track_name"], prog, drs_active)
+                
+            # Get persistent state
+            state = session.driver_telemetry_state.get(d_id)
+            if not state:
+                state = {
+                    "prev_speed": speed,
+                    "current_gear": 0 if is_retired else 1,
+                    "battery": 80.0
+                }
+                session.driver_telemetry_state[d_id] = state
+                
+            prev_speed = state["prev_speed"]
+            current_gear = state["current_gear"]
+            bat = state["battery"]
+            
+            if is_retired:
+                throttle = 0.0
+                brake = 0.0
+                current_gear = 0
+                rpm = 0
+                state["prev_speed"] = 0.0
+                state["current_gear"] = 0
+            else:
+                accel = speed - prev_speed
+                state["prev_speed"] = speed
+                
+                if is_pitting:
+                    throttle = 0.0
+                    brake = 1.0
+                else:
+                    if accel > 0.5:
+                        throttle = min(1.0, 0.3 + (accel / 5.0))
+                        brake = 0.0
+                    elif accel < -0.5:
+                        throttle = 0.0
+                        brake = min(1.0, 0.2 + (abs(accel) / 10.0))
+                    else:
+                        throttle = max(0.1, min(0.6, 0.25 + (tick % 3) * 0.02))
+                        brake = 0.0
+                        
+                if speed < 10.0:
+                    target_gear = 1
+                elif speed < 80.0:
+                    target_gear = 1
+                elif speed < 110.0:
+                    target_gear = 2
+                elif speed < 140.0:
+                    target_gear = 3
+                elif speed < 170.0:
+                    target_gear = 4
+                elif speed < 200.0:
+                    target_gear = 5
+                elif speed < 240.0:
+                    target_gear = 6
+                elif speed < 280.0:
+                    target_gear = 7
+                else:
+                    target_gear = 8
+                    
+                if target_gear > current_gear:
+                    current_gear += 1
+                elif target_gear < current_gear:
+                    current_gear -= 1
+                state["current_gear"] = current_gear
+                
+                max_speed_in_gear = [0, 80, 110, 140, 170, 200, 240, 280, 360]
+                if speed < 10.0:
+                    rpm = 4200
+                    if is_pitting:
+                        current_gear = 0
+                        state["current_gear"] = 0
+                else:
+                    g = max(1, min(8, current_gear))
+                    prev_gear_max = max_speed_in_gear[g-1]
+                    cur_gear_max = max_speed_in_gear[g]
+                    
+                    fraction = (speed - prev_gear_max) / (cur_gear_max - prev_gear_max)
+                    fraction = max(0.0, min(1.0, fraction))
+                    rpm = int(8500 + fraction * 6300 + (tick % 4) * 25)
+                    
+                if session.replay_status == "playing":
+                    if is_pitting or speed < 5.0:
+                        pass
+                    elif brake > 0.1:
+                        bat += 0.8 * brake * session.replay_speed
+                    elif throttle > 0.1:
+                        bat -= 0.35 * throttle * session.replay_speed
+                    else:
+                        bat += 0.02 * session.replay_speed
+                    bat = max(0.0, min(100.0, bat))
+                    state["battery"] = bat
+
+            telemetry_all_packet["data"][d_id] = {
+                "timestamp": datetime.now().isoformat(),
+                "driver_id": d_id,
+                "speed": round(speed, 1),
+                "rpm": rpm,
+                "throttle": round(throttle, 2),
+                "brake": round(brake, 2),
+                "gear": current_gear,
+                "tyre_age": item["tyre_age"],
+                "last_lap": item["last_lap"],
+                "battery": round(bat, 1),
+                "track_progress": round(prog, 5),
+                "is_pitting": is_pitting,
+                "laps": item["lap_num"]
+            }
+            
+        msg_str = json.dumps(telemetry_all_packet)
+        for ws in list(session.active_connections):
+            try:
+                await ws.send_text(msg_str)
+            except Exception:
+                pass
+
+        # 2. Send standings table and virtual session time (every tick / 100ms)
+        positions_packet = {
+            "type": "positions",
+            "data": [
+                {
+                    "position": item["position"],
+                    "driver_id": item["driver_id"],
+                    "driver_name": item["driver_name"],
+                    "team": item["team"],
+                    "gap": item["gap"],
+                    "interval": item["interval"],
+                    "last_lap": item["last_lap"],
+                    "best_lap": item["best_lap"],
+                    "tyre": item["tyre"],
+                    "tyre_age": item["tyre_age"],
+                    "laps": item["lap_num"],
+                    "track_progress": item["track_progress"],
+                    "drs_active": item["drs_active"],
+                    "delta": item["delta"],
+                    "is_pitting": item["is_pitting"],
+                    "lap_start_time": item["lap_start_time"],
+                    "lap_duration": item["lap_duration"],
+                    "pit_start_time": item["pit_start_time"],
+                    "pit_duration": item["pit_duration"],
+                    "s1": item["s1"],
+                    "s1_color": item["s1_color"],
+                    "s2": item["s2"],
+                    "s2_color": item["s2_color"],
+                    "s3": item["s3"],
+                    "s3_color": item["s3_color"]
+                }
+                for item in standings
+            ],
+            "current_session_time": session.current_session_time.isoformat() if session.current_session_time else None,
+            "weather": get_weather_at_time(session.current_session_time)
+        }
+        msg_str = json.dumps(positions_packet)
+        for ws in list(session.active_connections):
+            try:
+                await ws.send_text(msg_str)
+            except Exception:
+                pass
+                    
+        # 3. Send replay details (every 5 seconds / 50 ticks)
+        if tick % 50 == 0:
+            replay_packet = {
+                "type": "replay",
+                "data": {
+                    "status": session.replay_status,
+                    "speed": session.replay_speed,
+                    "current_lap": session.current_lap,
+                    "total_laps": session_cache["total_laps"],
+                    "track_status": session.track_status
+                }
+            }
+            msg_str = json.dumps(replay_packet)
+            for ws in list(session.active_connections):
+                try:
+                    await ws.send_text(msg_str)
+                except Exception:
+                    pass
+                    
+        # 4. Send live AI Strategist insights and sector events (only when playing)
+        if session.replay_status == "playing" and tick % 100 == 0:
+            d_id = standings[tick % len(standings)]["driver_id"] if standings else "VER"
+            is_pit_event = standings[tick % len(standings)]["is_pitting"] if standings else False
+            
+            msg = f"AI Strategist: Monitor tyre degradation on {d_id}. Pace delta stable."
+            if is_pit_event:
+                msg = f"AI Strategist: {d_id} currently in pit lane. Executing pit stop."
+                
+            insight_packet = {
+                "type": "insight",
+                "data": {
+                    "message": msg,
+                    "severity": "medium" if is_pit_event else "low"
+                }
+            }
+            event_packet = {
+                "type": "event",
+                "data": {
+                    "type": "PIT_ENTRY" if is_pit_event else "INFO",
+                    "message": f"{d_id} in the pits." if is_pit_event else f"{d_id} completing Lap {session.current_lap}."
+                }
+            }
+            for ws in list(session.active_connections):
+                try:
+                    await ws.send_text(json.dumps(insight_packet))
+                    await ws.send_text(json.dumps(event_packet))
+                except Exception:
+                    pass
+
 async def run_central_simulation_loop():
-    global current_lap, current_session_time, track_status, replay_status
     import time
     last_tick_time = time.time()
     tick = 0
@@ -1290,367 +1686,20 @@ async def run_central_simulation_loop():
                 await asyncio.sleep(0.1)
                 continue
                 
-            # Advance virtual session time if playing
-            if replay_status == "playing" and current_session_time:
-                end_time = get_session_end_time()
-                if end_time and current_session_time >= end_time:
-                    current_session_time = end_time
-                    replay_status = "paused"
-                    await broadcast_replay_status()
-                else:
-                    next_time = current_session_time + timedelta(seconds=dt * replay_speed)
-                    if end_time and next_time >= end_time:
-                        current_session_time = end_time
-                        replay_status = "paused"
-                        await broadcast_replay_status()
-                    else:
-                        current_session_time = next_time
-                
-                # Resolve current_lap based on current_session_time
-                standings = get_standings_for_lap(current_lap, current_session_time)
-                if standings:
-                    leader_id = standings[0]["driver_id"]
-                    leader_num = None
-                    for d in session_cache["drivers"]:
-                        if d["code"] == leader_id:
-                            leader_num = d["number"]
-                            break
-                    if leader_num:
-                        leader_laps = session_cache["laps_by_driver"].get(leader_num, [])
-                        resolved_lap = 1
-                        for lp in sorted(leader_laps, key=lambda x: x["lap_number"]):
-                            lp_date = lp.get("parsed_date_start")
-                            if lp_date and lp_date <= current_session_time:
-                                resolved_lap = lp["lap_number"]
-                            else:
-                                break
-                        current_lap = resolved_lap
-            else:
-                standings = get_standings_for_lap(current_lap, current_session_time)
-                
-            if not standings:
-                await asyncio.sleep(0.1)
-                continue
-                
-            # Map progress and active aerodynamics (DRS) for all drivers
-            for item in standings:
-                d_num = None
-                for d in session_cache["drivers"]:
-                    if d["code"] == item["driver_id"]:
-                        d_num = d["number"]
-                        break
-                
-                is_retired = item.get("gap") in ["DNF", "DNS", "DNQ"] or item.get("status") in ["DNF", "DNS"]
-                if is_retired:
-                    state = driver_telemetry_state.get(item["driver_id"])
-                    if state and "last_progress" in state:
-                        prog = state["last_progress"]
-                    else:
-                        try:
-                            num_val = int(d_num) if d_num else 0
-                        except ValueError:
-                            num_val = 0
-                        prog = 0.90 + (num_val % 17) * 0.005 if (item.get("gap") == "DNF" or item.get("status") == "DNF") else 0.0
-                    is_pitting = False
-                    lap_dur = 80.0
-                    pit_start = None
-                    pit_dur = 22.0
-                    drs_active = False
-                else:
-                    if d_num:
-                        prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, current_session_time, session_cache["track_name"])
-                    else:
-                        prog, is_pitting, lap_dur, pit_start, pit_dur = 0.0, False, 80.0, None, 22.0
-                    
-                    # Store last progress
-                    state = driver_telemetry_state.get(item["driver_id"])
-                    if not state:
-                        state = {
-                            "prev_speed": 0.0,
-                            "current_gear": 1,
-                            "battery": 80.0
-                        }
-                        driver_telemetry_state[item["driver_id"]] = state
-                    state["last_progress"] = prog
-                    
-                    # Check DRS zone
-                    track_location = session_cache["track_name"].lower()
-                    drs_active = False
-                    if not is_pitting:
-                        if "monza" in track_location:
-                            drs_active = (prog >= 0.82 or prog <= 0.18) or (prog >= 0.50 and prog <= 0.65)
-                        elif "silverstone" in track_location:
-                            drs_active = (prog >= 0.22 and prog <= 0.38) or (prog >= 0.70 and prog <= 0.88)
-                        elif "spa" in track_location:
-                            drs_active = (prog >= 0.42 and prog <= 0.60) or (prog >= 0.90 or prog <= 0.12)
-                        elif "barcelona" in track_location:
-                            drs_active = (prog >= 0.88 or prog <= 0.12) or (prog >= 0.40 and prog <= 0.55)
-                        else:
-                            drs_active = (prog >= 0.85 or prog <= 0.15)
-                
-                item["track_progress"] = prog
-                item["drs_active"] = drs_active
-                item["is_pitting"] = is_pitting
-                item["lap_duration"] = lap_dur
-                item["pit_start_time"] = pit_start
-                item["pit_duration"] = pit_dur
-
-            # Sort standings by actual distance covered (lap number + track progress) descending
-            standings.sort(key=lambda x: (x.get("lap_num") or 1) + (x.get("track_progress") or 0.0), reverse=True)
+            # Tick every active session
+            for session in list(client_sessions.values()):
+                if session.active_connections:
+                    await tick_session(session, dt, tick)
             
-            # Re-assign positions
-            for idx, item in enumerate(standings):
-                item["position"] = idx + 1
-
-            session_type_upper = session_cache.get("session_type", "Race").upper()
-            is_time_trial = "QUALIFYING" in session_type_upper or "PRACTICE" in session_type_upper
-            recalculate_gaps_and_intervals(standings, is_time_trial)
-
-            if replay_status == "playing":
-                track_status = get_track_status_at_time(current_session_time)
-
-            if active_connections:
-                # 1. Telemetry curves for all drivers on every tick (0.1s)
-                telemetry_all_packet = {
-                    "type": "telemetry_all",
-                    "data": {}
-                }
-                for idx, item in enumerate(standings):
-                    d_id = item["driver_id"]
-                    prog = item["track_progress"]
-                    is_pitting = item["is_pitting"]
-                    drs_active = item["drs_active"]
+            # Prune inactive sessions every 3000 ticks (5 minutes)
+            if tick % 3000 == 0:
+                prune_inactive_sessions()
                     
-                    is_retired = item.get("gap") in ["DNF", "DNS", "DNQ"] or item.get("status") in ["DNF", "DNS"]
-                    
-                    if is_retired:
-                        speed = 0.0
-                    elif is_pitting:
-                        speed = 0.0
-                    else:
-                        speed = get_interpolated_speed(session_cache["track_name"], prog, drs_active)
-                        
-                    # Get persistent state
-                    state = driver_telemetry_state.get(d_id)
-                    if not state:
-                        state = {
-                            "prev_speed": speed,
-                            "current_gear": 0 if is_retired else 1,
-                            "battery": 80.0
-                        }
-                        driver_telemetry_state[d_id] = state
-                        
-                    prev_speed = state["prev_speed"]
-                    current_gear = state["current_gear"]
-                    bat = state["battery"]
-                    
-                    if is_retired:
-                        throttle = 0.0
-                        brake = 0.0
-                        current_gear = 0
-                        rpm = 0
-                        state["prev_speed"] = 0.0
-                        state["current_gear"] = 0
-                    else:
-                        # Calculate acceleration (km/h change per 0.1s tick)
-                        accel = speed - prev_speed
-                        state["prev_speed"] = speed
-                        
-                        # Determine Throttle and Brake
-                        if is_pitting:
-                            throttle = 0.0
-                            brake = 1.0
-                        else:
-                            if accel > 0.5:
-                                throttle = min(1.0, 0.3 + (accel / 5.0))
-                                brake = 0.0
-                            elif accel < -0.5:
-                                throttle = 0.0
-                                brake = min(1.0, 0.2 + (abs(accel) / 10.0))
-                            else:
-                                # Add tiny speed noise to throttle to make graphs look natural
-                                throttle = max(0.1, min(0.6, 0.25 + (tick % 3) * 0.02))
-                                brake = 0.0
-                                
-                        # Gear Shifting logic (limit shift rate to at most 1 gear per 0.1s tick)
-                        if speed < 10.0:
-                            target_gear = 1
-                        elif speed < 80.0:
-                            target_gear = 1
-                        elif speed < 110.0:
-                            target_gear = 2
-                        elif speed < 140.0:
-                            target_gear = 3
-                        elif speed < 170.0:
-                            target_gear = 4
-                        elif speed < 200.0:
-                            target_gear = 5
-                        elif speed < 240.0:
-                            target_gear = 6
-                        elif speed < 280.0:
-                            target_gear = 7
-                        else:
-                            target_gear = 8
-                            
-                        if target_gear > current_gear:
-                            current_gear += 1
-                        elif target_gear < current_gear:
-                            current_gear -= 1
-                        state["current_gear"] = current_gear
-                        
-                        # RPM calculation (sweeping realistically with gear range fraction)
-                        max_speed_in_gear = [0, 80, 110, 140, 170, 200, 240, 280, 360]
-                        if speed < 10.0:
-                            rpm = 4200
-                            if is_pitting:
-                                current_gear = 0
-                                state["current_gear"] = 0
-                        else:
-                            g = max(1, min(8, current_gear))
-                            prev_gear_max = max_speed_in_gear[g-1]
-                            cur_gear_max = max_speed_in_gear[g]
-                            
-                            fraction = (speed - prev_gear_max) / (cur_gear_max - prev_gear_max)
-                            fraction = max(0.0, min(1.0, fraction))
-                            rpm = int(8500 + fraction * 6300 + (tick % 4) * 25)
-                            
-                        # ERS battery usage
-                        if replay_status == "playing":
-                            if is_pitting or speed < 5.0:
-                                # ERS is inactive when pitting or stationary
-                                pass
-                            elif brake > 0.1:
-                                # Kinetic harvesting scales with brake force
-                                bat += 0.8 * brake * replay_speed
-                            elif throttle > 0.1:
-                                # ERS deployment scales with throttle
-                                bat -= 0.35 * throttle * replay_speed
-                            else:
-                                # Minor charge/neutral state from engine/MGU-H recovery when coasting
-                                bat += 0.02 * replay_speed
-                            bat = max(0.0, min(100.0, bat))
-                            state["battery"] = bat
-
-                    telemetry_all_packet["data"][d_id] = {
-                        "timestamp": datetime.now().isoformat(),
-                        "driver_id": d_id,
-                        "speed": round(speed, 1),
-                        "rpm": rpm,
-                        "throttle": round(throttle, 2),
-                        "brake": round(brake, 2),
-                        "gear": current_gear,
-                        "tyre_age": item["tyre_age"],
-                        "last_lap": item["last_lap"],
-                        "battery": round(bat, 1),
-                        "track_progress": round(prog, 5),
-                        "is_pitting": is_pitting,
-                        "laps": item["lap_num"]
-                    }
-                    
-                msg_str = json.dumps(telemetry_all_packet)
-                for ws in list(active_connections):
-                    try:
-                        await ws.send_text(msg_str)
-                    except Exception:
-                        pass
-
-                # 2. Send standings table and virtual session time (every tick / 100ms)
-                positions_packet = {
-                    "type": "positions",
-                    "data": [
-                        {
-                            "position": item["position"],
-                            "driver_id": item["driver_id"],
-                            "driver_name": item["driver_name"],
-                            "team": item["team"],
-                            "gap": item["gap"],
-                            "interval": item["interval"],
-                            "last_lap": item["last_lap"],
-                            "best_lap": item["best_lap"],
-                            "tyre": item["tyre"],
-                            "tyre_age": item["tyre_age"],
-                            "laps": item["lap_num"],
-                            "track_progress": item["track_progress"],
-                            "drs_active": item["drs_active"],
-                            "delta": item["delta"],
-                            "is_pitting": item["is_pitting"],
-                            "lap_start_time": item["lap_start_time"],
-                            "lap_duration": item["lap_duration"],
-                            "pit_start_time": item["pit_start_time"],
-                            "pit_duration": item["pit_duration"],
-                            "s1": item["s1"],
-                            "s1_color": item["s1_color"],
-                            "s2": item["s2"],
-                            "s2_color": item["s2_color"],
-                            "s3": item["s3"],
-                            "s3_color": item["s3_color"]
-                        }
-                        for item in standings
-                    ],
-                    "current_session_time": current_session_time.isoformat() if current_session_time else None,
-                    "weather": get_weather_at_time(current_session_time)
-                }
-                msg_str = json.dumps(positions_packet)
-                for ws in list(active_connections):
-                    try:
-                        await ws.send_text(msg_str)
-                    except Exception:
-                        pass
-                            
-                # 3. Send replay details (every 5 seconds / 50 ticks)
-                if tick % 50 == 0:
-                    replay_packet = {
-                        "type": "replay",
-                        "data": {
-                            "status": replay_status,
-                            "speed": replay_speed,
-                            "current_lap": current_lap,
-                            "total_laps": session_cache["total_laps"],
-                            "track_status": track_status
-                        }
-                    }
-                    msg_str = json.dumps(replay_packet)
-                    for ws in list(active_connections):
-                        try:
-                            await ws.send_text(msg_str)
-                        except Exception:
-                            pass
-                            
-                # 4. Send live AI Strategist insights and sector events (only when playing)
-                if replay_status == "playing" and tick % 100 == 0:
-                    d_id = standings[tick % len(standings)]["driver_id"] if standings else "VER"
-                    is_pit_event = standings[tick % len(standings)]["is_pitting"] if standings else False
-                    
-                    msg = f"AI Strategist: Monitor tyre degradation on {d_id}. Pace delta stable."
-                    if is_pit_event:
-                        msg = f"AI Strategist: {d_id} currently in pit lane. Executing pit stop."
-                        
-                    insight_packet = {
-                        "type": "insight",
-                        "data": {
-                            "message": msg,
-                            "severity": "medium" if is_pit_event else "low"
-                        }
-                    }
-                    event_packet = {
-                        "type": "event",
-                        "data": {
-                            "type": "PIT_ENTRY" if is_pit_event else "INFO",
-                            "message": f"{d_id} in the pits." if is_pit_event else f"{d_id} completing Lap {current_lap}."
-                        }
-                    }
-                    for ws in list(active_connections):
-                        try:
-                            await ws.send_text(json.dumps(insight_packet))
-                            await ws.send_text(json.dumps(event_packet))
-                        except Exception:
-                            pass
-
             tick += 1
             await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"Error in central simulation loop: {e}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.1)
 
 def is_session_live(session_key) -> bool:
     # Spielberg GP 2026 sessions key list
@@ -1967,46 +2016,50 @@ async def select_session(session_key: str):
     return {"status": "success", "session_key": active_session_key}
 
 
-async def broadcast_replay_status():
+async def broadcast_replay_status_to_session(session: ClientSession):
     payload = json.dumps({
         "type": "replay",
         "data": {
-            "status": replay_status,
-            "speed": replay_speed,
-            "current_lap": current_lap,
+            "status": session.replay_status,
+            "speed": session.replay_speed,
+            "current_lap": session.current_lap,
             "total_laps": session_cache["total_laps"],
-            "track_status": track_status
+            "track_status": session.track_status
         }
     })
-    for ws in list(active_connections):
+    for ws in list(session.active_connections):
         try:
             await ws.send_text(payload)
         except Exception as e:
-            logger.error(f"Error broadcasting replay status: {e}")
+            logger.error(f"Error broadcasting replay status to session {session.client_id}: {e}")
+
+async def broadcast_replay_status():
+    # Deprecated fallback compatibility
+    await broadcast_replay_status_to_session(get_client_session("default"))
 
 @app.post("/api/replay/play")
-async def replay_play():
-    global replay_status
-    replay_status = "playing"
-    logger.info("Replay set to PLAYING")
-    await broadcast_replay_status()
-    return {"status": "success", "replay_status": replay_status}
+async def replay_play(client_id: str = None):
+    session = get_client_session(client_id)
+    session.replay_status = "playing"
+    logger.info(f"Replay set to PLAYING for client: {client_id}")
+    await broadcast_replay_status_to_session(session)
+    return {"status": "success", "replay_status": session.replay_status}
 
 @app.post("/api/replay/pause")
-async def replay_pause():
-    global replay_status
-    replay_status = "paused"
-    logger.info("Replay set to PAUSED")
-    await broadcast_replay_status()
-    return {"status": "success", "replay_status": replay_status}
+async def replay_pause(client_id: str = None):
+    session = get_client_session(client_id)
+    session.replay_status = "paused"
+    logger.info(f"Replay set to PAUSED for client: {client_id}")
+    await broadcast_replay_status_to_session(session)
+    return {"status": "success", "replay_status": session.replay_status}
 
 @app.post("/api/replay/speed/{speed}")
-async def replay_speed_select(speed: float):
-    global replay_speed
-    replay_speed = speed
-    logger.info(f"Replay speed set to: {replay_speed}")
-    await broadcast_replay_status()
-    return {"status": "success", "replay_speed": replay_speed}
+async def replay_speed_select(speed: float, client_id: str = None):
+    session = get_client_session(client_id)
+    session.replay_speed = speed
+    logger.info(f"Replay speed set to: {session.replay_speed} for client: {client_id}")
+    await broadcast_replay_status_to_session(session)
+    return {"status": "success", "replay_speed": session.replay_speed}
 
 def get_session_start_time():
     min_date = None
@@ -2030,30 +2083,31 @@ def get_session_end_time():
     return max_date
 
 @app.post("/api/replay/start")
-async def replay_go_to_start():
-    global current_session_time, current_lap
+async def replay_go_to_start(client_id: str = None):
+    session = get_client_session(client_id)
     start_time = get_session_start_time()
     if start_time:
-        current_session_time = start_time
-    current_lap = 1
-    logger.info(f"Replay jumped to START: {current_session_time}")
-    await broadcast_replay_status()
-    return {"status": "success", "current_session_time": current_session_time.isoformat() if current_session_time else None}
+        session.current_session_time = start_time
+    session.current_lap = 1
+    logger.info(f"Replay jumped to START for client: {client_id}: {session.current_session_time}")
+    await broadcast_replay_status_to_session(session)
+    return {"status": "success", "current_session_time": session.current_session_time.isoformat() if session.current_session_time else None}
 
 @app.post("/api/replay/end")
-async def replay_go_to_end():
-    global current_session_time, current_lap
+async def replay_go_to_end(client_id: str = None):
+    session = get_client_session(client_id)
     end_time = get_session_end_time()
     if end_time:
-        current_session_time = end_time
-    current_lap = session_cache.get("total_laps", 78)
-    logger.info(f"Replay jumped to END: {current_session_time}")
-    await broadcast_replay_status()
-    return {"status": "success", "current_session_time": current_session_time.isoformat() if current_session_time else None}
+        session.current_session_time = end_time
+    session.current_lap = session_cache.get("total_laps", 78)
+    logger.info(f"Replay jumped to END for client: {client_id}: {session.current_session_time}")
+    await broadcast_replay_status_to_session(session)
+    return {"status": "success", "current_session_time": session.current_session_time.isoformat() if session.current_session_time else None}
 
 @app.get("/api/drivers/{driver_code}/laps")
-async def get_driver_laps(driver_code: str):
-    global current_session_time
+async def get_driver_laps(driver_code: str, client_id: str = None):
+    session = get_client_session(client_id)
+    current_time = session.current_session_time
     driver_num = None
     for d in session_cache["drivers"]:
         if d["code"] == driver_code:
@@ -2070,9 +2124,9 @@ async def get_driver_laps(driver_code: str):
     for d_no, d_laps in session_cache["laps_by_driver"].items():
         for lap in d_laps:
             lap_start = lap.get("parsed_date_start")
-            if lap_start and current_session_time and lap_start <= current_session_time:
+            if lap_start and current_time and lap_start <= current_time:
                 dur = lap.get("lap_duration") or 80.0
-                if lap_start + timedelta(seconds=dur) <= current_session_time:
+                if lap_start + timedelta(seconds=dur) <= current_time:
                     all_completed_laps.append((d_no, lap))
                     
     best_s1_all = float("inf")
@@ -2144,13 +2198,14 @@ async def get_drivers():
     return session_cache["drivers"]
 
 @app.get("/api/positions")
-async def get_positions():
-    standings = get_standings_for_lap(current_lap, current_session_time)
+async def get_positions(client_id: str = None):
+    session = get_client_session(client_id)
+    standings = get_standings_for_lap(session.current_lap, session.current_session_time)
     if standings:
         for item in standings:
             d_num = next((d["number"] for d in session_cache["drivers"] if d["code"] == item["driver_id"]), None)
             if d_num:
-                prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, current_session_time, session_cache["track_name"])
+                prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, session.current_session_time, session_cache["track_name"])
             else:
                 prog, is_pitting, lap_dur, pit_start, pit_dur = 0.0, False, 80.0, None, 22.0
             item["track_progress"] = prog
@@ -2170,18 +2225,23 @@ async def get_positions():
     return standings
 
 @app.get("/api/telemetry/latest")
-async def get_latest_telemetry():
-    standings = get_standings_for_lap(current_lap, current_session_time)
+async def get_latest_telemetry(client_id: str = None):
+    session = get_client_session(client_id)
+    standings = get_standings_for_lap(session.current_lap, session.current_session_time)
     if standings:
         for item in standings:
             d_num = next((d["number"] for d in session_cache["drivers"] if d["code"] == item["driver_id"]), None)
             if d_num:
-                prog, _, _, _, _ = calculate_driver_progress(d_num, current_session_time, session_cache["track_name"])
+                prog, _, _, _, _ = calculate_driver_progress(d_num, session.current_session_time, session_cache["track_name"])
             else:
                 prog = 0.0
             item["track_progress"] = prog
         standings.sort(key=lambda x: (x.get("lap_num") or 1) + (x.get("track_progress") or 0.0), reverse=True)
         leader = standings[0]
+        bat = 75.0
+        state = session.driver_telemetry_state.get(leader["driver_id"])
+        if state and "battery" in state:
+            bat = state["battery"]
         return {
             "timestamp": datetime.now().isoformat(),
             "driver_id": leader["driver_id"],
@@ -2192,7 +2252,7 @@ async def get_latest_telemetry():
             "gear": 7,
             "tyre_age": leader["tyre_age"],
             "last_lap": leader["last_lap"],
-            "battery": 75.0
+            "battery": bat
         }
     return {
         "timestamp": datetime.now().isoformat(),
@@ -2208,25 +2268,27 @@ async def get_latest_telemetry():
     }
 
 @app.get("/api/replay/status")
-async def get_replay_status():
+async def get_replay_status(client_id: str = None):
+    session = get_client_session(client_id)
     return {
-        "status": replay_status,
-        "speed": replay_speed,
-        "current_lap": current_lap,
+        "status": session.replay_status,
+        "speed": session.replay_speed,
+        "current_lap": session.current_lap,
         "total_laps": session_cache["total_laps"],
-        "track_status": track_status,
-        "current_session_time": current_session_time.isoformat() if current_session_time else None
+        "track_status": session.track_status,
+        "current_session_time": session.current_session_time.isoformat() if session.current_session_time else None
     }
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
     await websocket.accept()
-    logger.info("WebSocket client connected")
-    active_connections.append(websocket)
+    session = get_client_session(client_id)
+    logger.info(f"WebSocket client connected: {client_id}")
+    session.active_connections.append(websocket)
     
     try:
         # Send initial standings and replay state instantly
-        standings = get_standings_for_lap(current_lap, current_session_time)
+        standings = get_standings_for_lap(session.current_lap, session.current_session_time)
         if standings:
             # Map progress and active aerodynamics (DRS) for all drivers
             for item in standings:
@@ -2237,7 +2299,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         break
                 
                 if d_num:
-                    prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, current_session_time, session_cache["track_name"])
+                    prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, session.current_session_time, session_cache["track_name"])
                 else:
                     prog, is_pitting, lap_dur, pit_start, pit_dur = 0.0, False, 80.0, None, 22.0
                 
@@ -2302,8 +2364,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     }
                     for item in standings
                 ],
-                "current_session_time": current_session_time.isoformat() if current_session_time else None,
-                "weather": get_weather_at_time(current_session_time)
+                "current_session_time": session.current_session_time.isoformat() if session.current_session_time else None,
+                "weather": get_weather_at_time(session.current_session_time)
             }
             await websocket.send_text(json.dumps(positions_packet))
 
@@ -2311,27 +2373,27 @@ async def websocket_endpoint(websocket: WebSocket):
         replay_packet = {
             "type": "replay",
             "data": {
-                "status": replay_status,
-                "speed": replay_speed,
-                "current_lap": current_lap,
+                "status": session.replay_status,
+                "speed": session.replay_speed,
+                "current_lap": session.current_lap,
                 "total_laps": session_cache["total_laps"],
-                "track_status": track_status
+                "track_status": session.track_status
             }
         }
         await websocket.send_text(json.dumps(replay_packet))
     except Exception as e:
-        logger.error(f"Error sending initial WebSocket payloads: {e}")
+        logger.error(f"Error sending initial WebSocket payloads for client {client_id}: {e}")
         
     try:
         while True:
             # Maintain connection, listen for text in case of keep-alive pings
             await websocket.receive_text()
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
+        logger.info(f"WebSocket client disconnected: {client_id}")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error for client {client_id}: {e}")
     finally:
         try:
-            active_connections.remove(websocket)
+            session.active_connections.remove(websocket)
         except ValueError:
             pass

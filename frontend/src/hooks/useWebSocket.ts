@@ -98,6 +98,16 @@ export interface WeatherInfo {
   rainfall: number;
 }
 
+const getClientId = () => {
+  if (typeof window === 'undefined') return 'server';
+  let id = window.sessionStorage.getItem('f1_race_engineer_client_id');
+  if (!id) {
+    id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    window.sessionStorage.setItem('f1_race_engineer_client_id', id);
+  }
+  return id;
+};
+
 const getUrls = () => {
   let isLocal = false;
   if (typeof window !== 'undefined') {
@@ -105,7 +115,6 @@ const getUrls = () => {
     isLocal = hostname === 'localhost' || hostname === '127.0.0.1';
   }
 
-  // Local development points directly to localhost, production Vercel points to Hugging Face via server-side rewrite proxy
   const baseUrl = isLocal ? 'http://127.0.0.1:8000' : '/api/backend';
   const wsUrl = isLocal ? 'ws://127.0.0.1:8000/ws' : 'wss://ash2kkid-f1-race-engineer.hf.space/ws';
   return { baseUrl, wsUrl };
@@ -477,7 +486,8 @@ export function useWebSocket() {
       return;
     }
     try {
-      await fetch(`${BASE_URL}/api/replay/play`, { method: 'POST' });
+      const clientId = getClientId();
+      await fetch(`${BASE_URL}/api/replay/play?client_id=${clientId}`, { method: 'POST' });
     } catch (e) { console.error(e); }
   };
 
@@ -488,7 +498,8 @@ export function useWebSocket() {
       return;
     }
     try {
-      await fetch(`${BASE_URL}/api/replay/pause`, { method: 'POST' });
+      const clientId = getClientId();
+      await fetch(`${BASE_URL}/api/replay/pause?client_id=${clientId}`, { method: 'POST' });
     } catch (e) { console.error(e); }
   };
 
@@ -499,7 +510,8 @@ export function useWebSocket() {
       return;
     }
     try {
-      await fetch(`${BASE_URL}/api/replay/speed/${speed}`, { method: 'POST' });
+      const clientId = getClientId();
+      await fetch(`${BASE_URL}/api/replay/speed/${speed}?client_id=${clientId}`, { method: 'POST' });
     } catch (e) { console.error(e); }
   };
 
@@ -524,7 +536,8 @@ export function useWebSocket() {
       return;
     }
     try {
-      await fetch(`${BASE_URL}/api/replay/start`, { method: 'POST' });
+      const clientId = getClientId();
+      await fetch(`${BASE_URL}/api/replay/start?client_id=${clientId}`, { method: 'POST' });
     } catch (e) { console.error(e); }
   };
 
@@ -561,7 +574,8 @@ export function useWebSocket() {
       return;
     }
     try {
-      await fetch(`${BASE_URL}/api/replay/end`, { method: 'POST' });
+      const clientId = getClientId();
+      await fetch(`${BASE_URL}/api/replay/end?client_id=${clientId}`, { method: 'POST' });
     } catch (e) { console.error(e); }
   };
 
@@ -574,7 +588,8 @@ export function useWebSocket() {
       wsRef.current.close();
     }
 
-    const ws = new WebSocket(WS_URL);
+    const clientId = getClientId();
+    const ws = new WebSocket(`${WS_URL}?client_id=${clientId}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
