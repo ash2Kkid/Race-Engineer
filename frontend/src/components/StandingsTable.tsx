@@ -151,10 +151,15 @@ export default function StandingsTable({
                     </td>
                     
                     {/* Tyre compound */}
-                    <td style={{ width: '40px' }}>
+                    <td style={{ width: '65px' }}>
                       {!isRetired ? (
-                        <div className={`tyre-badge ${pos.tyre}`}>
-                          {pos.tyre}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <div className={`tyre-badge ${pos.tyre}`} title={`${pos.tyre} Compound`}>
+                            {pos.tyre}
+                          </div>
+                          <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }} title="Tyre Age (Laps)">
+                            {pos.tyre_age}L
+                          </span>
                         </div>
                       ) : (
                         <span style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>--</span>

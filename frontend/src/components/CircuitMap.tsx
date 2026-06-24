@@ -403,6 +403,7 @@ export default function CircuitMap({
         else if (isDNF) labelText = `${code} (DNF)`;
         else if (isDNS) labelText = `${code} (DNS)`;
         else if (isDNQ) labelText = `${code} (DNQ)`;
+        else if (pos.tyre) labelText = `${code} (${pos.tyre}${pos.tyre_age || 0})`;
 
         const textWidth = ctx.measureText(labelText).width;
         const boxWidth = textWidth + (pos.driver_id === 'SC' ? 10 : 8);

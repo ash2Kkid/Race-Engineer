@@ -1153,6 +1153,127 @@ def get_standings_for_lap(lap_num: int, cur_time=None):
         
     return standings
 
+def recalculate_gaps_and_intervals(standings, is_time_trial=False):
+    if not standings:
+        return
+    
+    leader_item = standings[0]
+    for idx, item in enumerate(standings):
+        # Check if retired/DNS from gap value or status
+        is_retired = item.get("gap") in ["DNF", "DNS", "DNQ"] or item.get("status") in ["DNF", "DNS"]
+        if is_retired:
+            status_val = "DNF" if (item.get("gap") == "DNF" or item.get("status") == "DNF") else "DNS"
+            item["gap"] = status_val
+            item["interval"] = status_val
+            item["gap_seconds"] = 9999.0
+            item["delta"] = 9999.0
+            continue
+            
+        if is_time_trial:
+            curr_best = item.get("best_duration", float("inf"))
+            leader_best = leader_item.get("best_duration", float("inf"))
+            
+            if curr_best == float("inf"):
+                item["gap"] = "N/A"
+                item["interval"] = "N/A"
+                item["gap_seconds"] = 9999.0
+                item["delta"] = 9999.0
+            else:
+                if idx == 0:
+                    item["gap"] = "FASTEST"
+                    item["interval"] = "FASTEST"
+                    item["gap_seconds"] = 0.0
+                    item["delta"] = 0.0
+                else:
+                    if leader_best != float("inf"):
+                        diff = curr_best - leader_best
+                        item["gap"] = f"+{diff:.3f}s"
+                        item["gap_seconds"] = diff
+                    else:
+                        item["gap"] = "N/A"
+                        item["gap_seconds"] = 9999.0
+                    
+                    prev_best = float("inf")
+                    for p_idx in range(idx - 1, -1, -1):
+                        p_item = standings[p_idx]
+                        p_is_retired = p_item.get("gap") in ["DNF", "DNS", "DNQ"] or p_item.get("status") in ["DNF", "DNS"]
+                        if not p_is_retired:
+                            p_b = p_item.get("best_duration", float("inf"))
+                            if p_b != float("inf"):
+                                prev_best = p_b
+                                break
+                    if prev_best != float("inf"):
+                        diff_int = curr_best - prev_best
+                        item["interval"] = f"+{diff_int:.3f}s"
+                        item["delta"] = diff_int
+                    else:
+                        item["interval"] = "N/A"
+                        item["delta"] = 9999.0
+        else:
+            if idx == 0:
+                item["gap"] = "LEADER"
+                item["interval"] = "LEADER"
+                item["gap_seconds"] = 0.0
+                item["delta"] = 0.0
+            else:
+                # Gap to leader
+                leader_lap = leader_item.get("lap_num") or 1
+                leader_prog = leader_item.get("track_progress") or 0.0
+                leader_total = leader_lap + leader_prog
+                
+                item_lap = item.get("lap_num") or 1
+                item_prog = item.get("track_progress") or 0.0
+                item_total = item_lap + item_prog
+                
+                lap_diff = leader_total - item_total
+                
+                if lap_diff >= 0.9:
+                    laps_behind = int(round(lap_diff))
+                    item["gap"] = f"+{laps_behind} LAP" if laps_behind == 1 else f"+{laps_behind} LAPS"
+                    item["gap_seconds"] = laps_behind * 80.0
+                else:
+                    leader_lap_dur = leader_item.get("lap_duration") or 75.0
+                    diff_seconds = lap_diff * leader_lap_dur
+                    if diff_seconds > 0.0:
+                        item["gap"] = f"+{diff_seconds:.3f}s"
+                        item["gap_seconds"] = diff_seconds
+                    else:
+                        item["gap"] = "0.000s"
+                        item["gap_seconds"] = 0.0
+                
+                # Interval to car ahead
+                prev_item = None
+                for p_idx in range(idx - 1, -1, -1):
+                    p_item = standings[p_idx]
+                    p_is_retired = p_item.get("gap") in ["DNF", "DNS", "DNQ"] or p_item.get("status") in ["DNF", "DNS"]
+                    if not p_is_retired:
+                        prev_item = p_item
+                        break
+                
+                if not prev_item:
+                    item["interval"] = "LEADER"
+                    item["delta"] = 0.0
+                else:
+                    prev_lap = prev_item.get("lap_num") or 1
+                    prev_prog = prev_item.get("track_progress") or 0.0
+                    prev_total = prev_lap + prev_prog
+                    
+                    int_diff = prev_total - item_total
+                    
+                    if int_diff >= 0.9:
+                        laps_behind = int(round(int_diff))
+                        item["interval"] = f"+{laps_behind} LAP" if laps_behind == 1 else f"+{laps_behind} LAPS"
+                        item["delta"] = laps_behind * 80.0
+                    else:
+                        prev_lap_dur = prev_item.get("lap_duration") or 75.0
+                        diff_seconds = int_diff * prev_lap_dur
+                        if diff_seconds > 0.0:
+                            item["interval"] = f"+{diff_seconds:.3f}s"
+                            item["delta"] = diff_seconds
+                        else:
+                            item["interval"] = "0.000s"
+                            item["delta"] = 0.0
+
 async def run_central_simulation_loop():
     global current_lap, current_session_time, track_status, replay_status
     import time
@@ -1280,6 +1401,10 @@ async def run_central_simulation_loop():
             # Re-assign positions
             for idx, item in enumerate(standings):
                 item["position"] = idx + 1
+
+            session_type_upper = session_cache.get("session_type", "Race").upper()
+            is_time_trial = "QUALIFYING" in session_type_upper or "PRACTICE" in session_type_upper
+            recalculate_gaps_and_intervals(standings, is_time_trial)
 
             if replay_status == "playing":
                 track_status = get_track_status_at_time(current_session_time)
@@ -2020,12 +2145,42 @@ async def get_drivers():
 
 @app.get("/api/positions")
 async def get_positions():
-    return get_standings_for_lap(current_lap, current_session_time)
+    standings = get_standings_for_lap(current_lap, current_session_time)
+    if standings:
+        for item in standings:
+            d_num = next((d["number"] for d in session_cache["drivers"] if d["code"] == item["driver_id"]), None)
+            if d_num:
+                prog, is_pitting, lap_dur, pit_start, pit_dur = calculate_driver_progress(d_num, current_session_time, session_cache["track_name"])
+            else:
+                prog, is_pitting, lap_dur, pit_start, pit_dur = 0.0, False, 80.0, None, 22.0
+            item["track_progress"] = prog
+            item["drs_active"] = False
+            item["is_pitting"] = is_pitting
+            item["lap_duration"] = lap_dur
+            item["pit_start_time"] = pit_start
+            item["pit_duration"] = pit_dur
+        
+        standings.sort(key=lambda x: (x.get("lap_num") or 1) + (x.get("track_progress") or 0.0), reverse=True)
+        for idx, item in enumerate(standings):
+            item["position"] = idx + 1
+        
+        session_type_upper = session_cache.get("session_type", "Race").upper()
+        is_time_trial = "QUALIFYING" in session_type_upper or "PRACTICE" in session_type_upper
+        recalculate_gaps_and_intervals(standings, is_time_trial)
+    return standings
 
 @app.get("/api/telemetry/latest")
 async def get_latest_telemetry():
     standings = get_standings_for_lap(current_lap, current_session_time)
     if standings:
+        for item in standings:
+            d_num = next((d["number"] for d in session_cache["drivers"] if d["code"] == item["driver_id"]), None)
+            if d_num:
+                prog, _, _, _, _ = calculate_driver_progress(d_num, current_session_time, session_cache["track_name"])
+            else:
+                prog = 0.0
+            item["track_progress"] = prog
+        standings.sort(key=lambda x: (x.get("lap_num") or 1) + (x.get("track_progress") or 0.0), reverse=True)
         leader = standings[0]
         return {
             "timestamp": datetime.now().isoformat(),
@@ -2110,6 +2265,10 @@ async def websocket_endpoint(websocket: WebSocket):
             standings.sort(key=lambda x: (x.get("lap_num") or 1) + (x.get("track_progress") or 0.0), reverse=True)
             for idx, item in enumerate(standings):
                 item["position"] = idx + 1
+
+            session_type_upper = session_cache.get("session_type", "Race").upper()
+            is_time_trial = "QUALIFYING" in session_type_upper or "PRACTICE" in session_type_upper
+            recalculate_gaps_and_intervals(standings, is_time_trial)
 
             positions_packet = {
                 "type": "positions",
