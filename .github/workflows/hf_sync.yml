@@ -19,4 +19,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push --force https://ash2Kkid:$HF_TOKEN@huggingface.co/spaces/ash2Kkid/F1-Race-Engineer main
+          git push --force https://git:$HF_TOKEN@huggingface.co/spaces/ash2Kkid/F1-Race-Engineer main
