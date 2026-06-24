@@ -27,6 +27,7 @@ export default function CircuitMap({
 }: CircuitMapProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const requestRef = useRef<number | null>(null);
+  const animatedProgressesRef = useRef<Record<string, number>>({});
 
   const [hoveredTrack, setHoveredTrack] = React.useState<{
     x: number;
@@ -284,6 +285,26 @@ export default function CircuitMap({
         ? standings.filter(s => filterDriverIds.includes(s.driver_id))
         : standings;
 
+      // Update smooth animated progresses with wrap-around support
+      activePositions.forEach(pos => {
+        const dId = pos.driver_id;
+        const targetProg = pos.track_progress;
+        
+        if (animatedProgressesRef.current[dId] === undefined) {
+          animatedProgressesRef.current[dId] = targetProg;
+        } else {
+          let currentProg = animatedProgressesRef.current[dId];
+          let diff = targetProg - currentProg;
+          if (diff < -0.5) {
+            diff += 1.0;
+          } else if (diff > 0.5) {
+            diff -= 1.0;
+          }
+          currentProg += diff * 0.08; // 0.08 smoothing factor (lower = smoother/slower, higher = faster/jitterier)
+          animatedProgressesRef.current[dId] = (currentProg + 1.0) % 1.0;
+        }
+      });
+
       // Sort to draw selected driver and Safety Car on top of others
       const sortedDrawList = [...activePositions].sort((a, b) => {
         if (a.driver_id === 'SC') return 1;
@@ -298,7 +319,7 @@ export default function CircuitMap({
       });
 
       sortedDrawList.forEach(pos => {
-        const extProg = pos.track_progress;
+        const extProg = animatedProgressesRef.current[pos.driver_id] ?? pos.track_progress;
         const normPos = getPositionOnPath(rawPoints, extProg);
         const pixelPos = mapToCanvas(normPos, width, height);
         const color = getDriverColor(pos.driver_id);
