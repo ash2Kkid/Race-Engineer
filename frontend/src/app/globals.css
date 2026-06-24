@@ -385,10 +385,59 @@ input:checked + .slider:before {
 .sector-color-box.PURPLE { background-color: #c084fc; }
 
 /* Race Status Panel */
+.status-panel-container {
+  container-type: inline-size;
+  width: 100%;
+  padding: 10px 16px !important;
+}
+
 .status-panel-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 12px 24px;
+  width: 100%;
+}
+
+.weather-widget {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  height: 28px;
+}
+
+.session-clocks-widget {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+@container (min-width: 680px) {
+  .status-panel-row {
+    justify-content: space-between;
+  }
+}
+
+@container (max-width: 480px) {
+  .status-panel-row {
+    gap: 8px 12px;
+  }
+  .weather-widget {
+    gap: 8px;
+    padding: 4px 8px;
+    font-size: 10px;
+  }
+  .session-clocks-widget {
+    gap: 12px;
+  }
 }
 
 .flag-box {

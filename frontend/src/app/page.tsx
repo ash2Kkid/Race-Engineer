@@ -252,7 +252,7 @@ export default function Home() {
             {/* Column 2: Status, Map, Feeds */}
             <div className="grid-right-col">
               {/* Row 1: Session stopwatch and control buttons */}
-              <div style={{ height: '70px' }}>
+              <div style={{ minHeight: '70px', height: 'auto', flexShrink: 0 }}>
                 <RaceStatus
                   replayStatus={ws.replayStatus}
                   currentSessionTime={ws.currentSessionTime}

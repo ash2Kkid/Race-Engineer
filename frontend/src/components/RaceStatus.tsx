@@ -153,23 +153,11 @@ export default function RaceStatus({
   const userTime = getFormattedTime(currentSessionTime, userTimeZone);
 
   return (
-    <div className="panel-card" style={{ height: '100%', justifyContent: 'center' }}>
+    <div className="panel-card status-panel-container" style={{ minHeight: '100%', justifyContent: 'center' }}>
       <div className="status-panel-row">
         {/* Weather Info widget */}
         {weather && (
-          <div className="weather-widget" style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-            backgroundColor: 'rgba(255, 255, 255, 0.03)',
-            border: '1px solid rgba(255, 255, 255, 0.05)',
-            borderRadius: '4px',
-            padding: '4px 10px',
-            fontSize: '11px',
-            fontWeight: '600',
-            color: 'var(--text-primary)',
-            height: '28px',
-          }}>
+          <div className="weather-widget">
             <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
               {weather.rainfall === 1 ? '🌧️' : '☀️'}
             </span>
@@ -219,7 +207,7 @@ export default function RaceStatus({
 
         {/* Virtual Session clocks / Countdown */}
         {sessionType === 'RACE' ? (
-          <div style={{ display: 'flex', gap: '18px', alignItems: 'center' }}>
+          <div className="session-clocks-widget">
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: '96px' }}>
               <span style={{ fontSize: '8px', color: 'var(--text-secondary)', fontWeight: '800', letterSpacing: '0.5px', textTransform: 'uppercase' }}>{trackTzLabel}</span>
               <span style={{ fontSize: '15px', fontWeight: '800', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{trackTime}</span>
