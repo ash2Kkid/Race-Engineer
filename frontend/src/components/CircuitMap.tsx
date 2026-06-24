@@ -300,7 +300,7 @@ export default function CircuitMap({
           } else if (diff > 0.5) {
             diff -= 1.0;
           }
-          currentProg += diff * 0.08; // 0.08 smoothing factor (lower = smoother/slower, higher = faster/jitterier)
+          currentProg += diff * 0.18; // 0.18 smoothing factor (lower = smoother/slower, higher = faster/jitterier)
           animatedProgressesRef.current[dId] = (currentProg + 1.0) % 1.0;
         }
       });

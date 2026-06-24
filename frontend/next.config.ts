@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: '/api/backend/:path*',
-        destination: 'https://ash2kkid-f1-race-engineer.hf.space/api/:path*',
+        destination: 'https://ash2kkid-f1-race-engineer.hf.space/:path*',
       },
     ];
   },
