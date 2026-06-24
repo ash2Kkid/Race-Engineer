@@ -98,9 +98,25 @@ export interface WeatherInfo {
   rainfall: number;
 }
 
-const RAW_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
-const BASE_URL = RAW_BASE_URL.replace(/\/+$/, '');
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || (BASE_URL.replace(/^http/, 'ws') + '/ws');
+const getUrls = () => {
+  let backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '';
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    // Auto-detect production deployed client and point it to the production Render backend
+    if (!backendUrl || backendUrl.includes('127.0.0.1') || backendUrl.includes('localhost')) {
+      if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        backendUrl = 'https://f1-race-engineer.onrender.com';
+      }
+    }
+  }
+  if (!backendUrl) {
+    backendUrl = 'http://127.0.0.1:8000';
+  }
+  const baseUrl = backendUrl.replace(/\/+$/, '');
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || (baseUrl.replace(/^http/, 'ws') + '/ws');
+  return { baseUrl, wsUrl };
+};
+
 
 const timeToSeconds = (timeStr: string): number => {
   if (!timeStr || timeStr === 'N/A' || timeStr.includes('DN') || timeStr === '--') return Infinity;
@@ -148,6 +164,7 @@ const mockSessions: Session[] = [
 ];
 
 export function useWebSocket() {
+  const { baseUrl: BASE_URL, wsUrl: WS_URL } = getUrls();
   // App States
   const [activePageIndex, setActivePageIndex] = useState<number>(0); // 0 = Race Control, 1 = Telemetry
   const [isSimulation, setIsSimulation] = useState<boolean>(false);
