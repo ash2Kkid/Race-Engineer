@@ -1780,6 +1780,13 @@ async def startup_event():
     asyncio.create_task(run_central_simulation_loop())
     asyncio.create_task(poll_live_openf1_data_loop())
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "message": "F1 Race Engineer Backend API is running successfully on Hugging Face Spaces!"
+    }
+
 @app.get("/api/sessions")
 async def get_sessions():
     return [
