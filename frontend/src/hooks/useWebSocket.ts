@@ -98,7 +98,8 @@ export interface WeatherInfo {
   rainfall: number;
 }
 
-const BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
+const RAW_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
+const BASE_URL = RAW_BASE_URL.replace(/\/+$/, '');
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || (BASE_URL.replace(/^http/, 'ws') + '/ws');
 
 const timeToSeconds = (timeStr: string): number => {
