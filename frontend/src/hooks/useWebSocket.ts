@@ -105,7 +105,7 @@ const getUrls = () => {
     // Auto-detect production deployed client and point it to the production Render backend
     if (!backendUrl || backendUrl.includes('127.0.0.1') || backendUrl.includes('localhost')) {
       if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
-        backendUrl = 'https://f1-race-engineer.onrender.com';
+        backendUrl = 'https://ash2kkid-f1-race-engineer.hf.space';
       }
     }
   }
