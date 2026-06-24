@@ -100,20 +100,27 @@ export interface WeatherInfo {
 
 const getUrls = () => {
   let backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '';
+  let isLocal = false;
+
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
-    // Auto-detect production deployed client and point it to the production Render backend
+    isLocal = hostname === 'localhost' || hostname === '127.0.0.1';
     if (!backendUrl || backendUrl.includes('127.0.0.1') || backendUrl.includes('localhost')) {
-      if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      if (!isLocal) {
         backendUrl = 'https://ash2kkid-f1-race-engineer.hf.space';
       }
     }
   }
+
   if (!backendUrl) {
     backendUrl = 'http://127.0.0.1:8000';
+    isLocal = true;
   }
-  const baseUrl = backendUrl.replace(/\/+$/, '');
-  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || (baseUrl.replace(/^http/, 'ws') + '/ws');
+
+  const directBaseUrl = backendUrl.replace(/\/+$/, '');
+  // Use relative next.js API rewrite proxy to bypass CORS for HTTP requests on deployed env
+  const baseUrl = isLocal ? 'http://127.0.0.1:8000' : '/api/backend';
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || (directBaseUrl.replace(/^http/, 'ws') + '/ws');
   return { baseUrl, wsUrl };
 };
 
