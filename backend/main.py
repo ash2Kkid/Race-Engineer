@@ -1638,7 +1638,8 @@ async def tick_session(session: ClientSession, dt: float, tick: int):
                     "speed": session.replay_speed,
                     "current_lap": session.current_lap,
                     "total_laps": session_cache["total_laps"],
-                    "track_status": session.track_status
+                    "track_status": session.track_status,
+                    "is_mock": is_using_mock_data
                 }
             }
             msg_str = json.dumps(replay_packet)
@@ -1971,11 +1972,11 @@ async def root():
 @app.get("/api/sessions")
 async def get_sessions():
     return [
-        {"id": "11315", "name": "Austrian GP 2026 - Race [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11315", "type": "RACE"},
-        {"id": "11311", "name": "Austrian GP 2026 - Qualifying [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11311", "type": "QUALIFYING"},
-        {"id": "11308", "name": "Austrian GP 2026 - Practice 1 [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11308", "type": "PRACTICE"},
-        {"id": "11309", "name": "Austrian GP 2026 - Practice 2 [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11309", "type": "PRACTICE"},
-        {"id": "11310", "name": "Austrian GP 2026 - Practice 3 [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11310", "type": "PRACTICE"},
+        {"id": "11315", "name": "Austrian GP 2026 - Race [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11315", "type": "RACE", "start_time": "2026-06-28T13:00:00Z"},
+        {"id": "11311", "name": "Austrian GP 2026 - Qualifying [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11311", "type": "QUALIFYING", "start_time": "2026-06-27T14:00:00Z"},
+        {"id": "11308", "name": "Austrian GP 2026 - Practice 1 [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11308", "type": "PRACTICE", "start_time": "2026-06-26T11:30:00Z"},
+        {"id": "11309", "name": "Austrian GP 2026 - Practice 2 [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11309", "type": "PRACTICE", "start_time": "2026-06-26T15:00:00Z"},
+        {"id": "11310", "name": "Austrian GP 2026 - Practice 3 [LIVE]", "track_name": "Red Bull Ring", "is_active": str(active_session_key) == "11310", "type": "PRACTICE", "start_time": "2026-06-27T10:30:00Z"},
         {"id": "11307", "name": "Barcelona GP 2026 - Race", "track_name": "Circuit de Barcelona-Catalunya", "is_active": str(active_session_key) == "11307", "type": "RACE"},
         {"id": "11303", "name": "Barcelona GP 2026 - Qualifying", "track_name": "Circuit de Barcelona-Catalunya", "is_active": str(active_session_key) == "11303", "type": "QUALIFYING"},
         {"id": "9523", "name": "Monaco GP 2024 - Race", "track_name": "Circuit de Monaco", "is_active": str(active_session_key) == "9523", "type": "RACE"},
@@ -2031,7 +2032,8 @@ async def broadcast_replay_status_to_session(session: ClientSession):
             "speed": session.replay_speed,
             "current_lap": session.current_lap,
             "total_laps": session_cache["total_laps"],
-            "track_status": session.track_status
+            "track_status": session.track_status,
+            "is_mock": is_using_mock_data
         }
     })
     for ws in list(session.active_connections):
@@ -2394,7 +2396,8 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
                 "speed": session.replay_speed,
                 "current_lap": session.current_lap,
                 "total_laps": session_cache["total_laps"],
-                "track_status": session.track_status
+                "track_status": session.track_status,
+                "is_mock": is_using_mock_data
             }
         }
         await websocket.send_text(json.dumps(replay_packet))
