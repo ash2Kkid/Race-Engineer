@@ -17,6 +17,7 @@ export interface Session {
   trackName: string;
   isActive: boolean;
   type?: 'RACE' | 'QUALIFYING' | 'PRACTICE';
+  startTime?: string;
 }
 
 export interface CompletedLap {
@@ -75,6 +76,7 @@ export interface ReplayStatus {
   currentLap: number;
   totalLaps: number;
   trackStatus: string;
+  isMock?: boolean;
 }
 
 export interface EventFeedItem {
@@ -157,9 +159,12 @@ const mockDrivers: Driver[] = [
 // Default Mock Sessions
 const mockSessions: Session[] = [
   { id: '11307', name: 'Barcelona GP 2026 - Race', trackName: 'Circuit de Barcelona-Catalunya', isActive: true, type: 'RACE' },
-  { id: 'austria_2026', name: 'Austrian GP 2026 - Race', trackName: 'Red Bull Ring', isActive: false, type: 'RACE' },
-  { id: 'austria_q', name: 'Austrian GP 2026 - Qualifying', trackName: 'Red Bull Ring', isActive: false, type: 'QUALIFYING' },
-  { id: 'austria_fp2', name: 'Austrian GP 2026 - FP2', trackName: 'Red Bull Ring', isActive: false, type: 'PRACTICE' },
+  { id: '11303', name: 'Barcelona GP 2026 - Qualifying', trackName: 'Circuit de Barcelona-Catalunya', isActive: false, type: 'QUALIFYING' },
+  { id: '11315', name: 'Austrian GP 2026 - Race [LIVE]', trackName: 'Red Bull Ring', isActive: false, type: 'RACE', startTime: '2026-06-28T13:00:00Z' },
+  { id: '11311', name: 'Austrian GP 2026 - Qualifying [LIVE]', trackName: 'Red Bull Ring', isActive: false, type: 'QUALIFYING', startTime: '2026-06-27T14:00:00Z' },
+  { id: '11308', name: 'Austrian GP 2026 - Practice 1 [LIVE]', trackName: 'Red Bull Ring', isActive: false, type: 'PRACTICE', startTime: '2026-06-26T11:30:00Z' },
+  { id: '11309', name: 'Austrian GP 2026 - Practice 2 [LIVE]', trackName: 'Red Bull Ring', isActive: false, type: 'PRACTICE', startTime: '2026-06-26T15:00:00Z' },
+  { id: '11310', name: 'Austrian GP 2026 - Practice 3 [LIVE]', trackName: 'Red Bull Ring', isActive: false, type: 'PRACTICE', startTime: '2026-06-27T10:30:00Z' },
   { id: '9523', name: 'Monaco GP 2024 - Race', trackName: 'Circuit de Monaco', isActive: false, type: 'RACE' },
   { id: '9558', name: 'British GP 2024 - Race', trackName: 'Silverstone Circuit', isActive: false, type: 'RACE' },
   { id: '9574', name: 'Spa GP 2024 - Race', trackName: 'Circuit de Spa-Francorchamps', isActive: false, type: 'RACE' },
@@ -185,7 +190,8 @@ export function useWebSocket() {
     speed: 1.0,
     currentLap: 1,
     totalLaps: 66,
-    trackStatus: 'GREEN'
+    trackStatus: 'GREEN',
+    isMock: false
   });
   const [currentSessionTime, setCurrentSessionTime] = useState<string | null>(null);
   const [weather, setWeather] = useState<WeatherInfo>({
@@ -417,7 +423,8 @@ export function useWebSocket() {
           name: s.name,
           trackName: s.track_name,
           isActive: s.is_active,
-          type: s.type
+          type: s.type,
+          startTime: s.start_time
         }));
         setSessions(mapped);
         const active = mapped.find((s: any) => s.isActive) || mapped[0];
@@ -690,7 +697,8 @@ export function useWebSocket() {
             speed: payload.speed,
             currentLap: payload.current_lap,
             totalLaps: payload.total_laps,
-            trackStatus: payload.track_status
+            trackStatus: payload.track_status,
+            isMock: payload.is_mock
           });
         } 
         else if (type === 'event') {
@@ -1604,7 +1612,8 @@ export function useWebSocket() {
         speed: simSpeedRef.current,
         currentLap: currentLapVal,
         totalLaps: 66,
-        trackStatus: simTrackStatusRef.current
+        trackStatus: simTrackStatusRef.current,
+        isMock: true
       });
 
     }, 100);

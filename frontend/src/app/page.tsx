@@ -11,10 +11,17 @@ import TelemetryComparison from '../components/TelemetryComparison';
 import LapTelemetryAnalysis from '../components/LapTelemetryAnalysis';
 import PodiumBar from '../components/PodiumBar';
 import ConfettiCanvas from '../components/ConfettiCanvas';
+import CountdownTimer from '../components/CountdownTimer';
 
 export default function Home() {
   const ws = useWebSocket();
   const [isComparisonMode, setIsComparisonMode] = useState<boolean>(true);
+  const [isCountdownDismissed, setIsCountdownDismissed] = useState<boolean>(false);
+
+  // Reset dismissed state when active session changes
+  React.useEffect(() => {
+    setIsCountdownDismissed(false);
+  }, [ws.activeSessionId]);
 
   // Helper to find track name from sessions list
   const getActiveTrackName = () => {
@@ -74,8 +81,21 @@ export default function Home() {
     return driver ? driver.code : driverId;
   };
 
+  const activeSession = ws.sessions.find(s => s.id === ws.activeSessionId);
+  const isAustrianSession = activeSession && ['11308', '11309', '11310', '11311', '11315'].includes(activeSession.id);
+  const isUpcoming = isAustrianSession && activeSession.startTime && ws.replayStatus.isMock;
+
   return (
     <div className="dashboard-container">
+      {/* Upcoming Session Countdown Overlay */}
+      {isUpcoming && !isCountdownDismissed && activeSession && (
+        <CountdownTimer
+          sessionName={activeSession.name}
+          startTime={activeSession.startTime!}
+          onDismiss={() => setIsCountdownDismissed(true)}
+        />
+      )}
+
       {/* F1 Start Lights HUD */}
       {ws.lights !== -1 && (
         <div className="lights-overlay">
