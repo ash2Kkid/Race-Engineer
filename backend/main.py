@@ -1328,17 +1328,24 @@ async def tick_session(session: ClientSession, dt: float, tick: int):
         
     # Advance virtual session time if playing
     if session.replay_status == "playing" and session.current_session_time:
-        end_time = get_session_end_time()
-        if end_time and session.current_session_time >= end_time:
-            session.current_session_time = end_time
-            session.replay_status = "paused"
-            await broadcast_replay_status_to_session(session)
+        is_live = is_session_live(session_cache.get("session_key"))
+        if is_live:
+            limit_time = get_live_limit_time()
         else:
-            next_time = session.current_session_time + timedelta(seconds=dt * session.replay_speed)
-            if end_time and next_time >= end_time:
-                session.current_session_time = end_time
+            limit_time = get_session_end_time()
+            
+        if limit_time and session.current_session_time >= limit_time:
+            session.current_session_time = limit_time
+            if not is_live:
                 session.replay_status = "paused"
                 await broadcast_replay_status_to_session(session)
+        else:
+            next_time = session.current_session_time + timedelta(seconds=dt * session.replay_speed)
+            if limit_time and next_time >= limit_time:
+                session.current_session_time = limit_time
+                if not is_live:
+                    session.replay_status = "paused"
+                    await broadcast_replay_status_to_session(session)
             else:
                 session.current_session_time = next_time
         
@@ -2082,6 +2089,12 @@ def get_session_end_time():
                     max_date = lap_date
     return max_date
 
+def get_live_limit_time():
+    global last_position_timestamp
+    if last_position_timestamp:
+        return parse_date(last_position_timestamp)
+    return get_session_end_time() or datetime.now()
+
 @app.post("/api/replay/start")
 async def replay_go_to_start(client_id: str = None):
     session = get_client_session(client_id)
@@ -2096,7 +2109,11 @@ async def replay_go_to_start(client_id: str = None):
 @app.post("/api/replay/end")
 async def replay_go_to_end(client_id: str = None):
     session = get_client_session(client_id)
-    end_time = get_session_end_time()
+    is_live = is_session_live(session_cache.get("session_key"))
+    if is_live:
+        end_time = get_live_limit_time()
+    else:
+        end_time = get_session_end_time()
     if end_time:
         session.current_session_time = end_time
     session.current_lap = session_cache.get("total_laps", 78)
